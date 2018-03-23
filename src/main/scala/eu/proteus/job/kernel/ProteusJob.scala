@@ -68,6 +68,7 @@ object ProteusJob {
   private [kernel] var kafkaBootstrapServer = "localhost:2181"
   // private [kernel] var realtimeDataKafkaTopic = "proteus-realtime"
   private [kernel] var realtimeDataKafkaTopic = "proteus-realtime"
+  private [kernel] var processedRealtimeDataKafkaTopic = "proteus-processed-realtime"
   // private [kernel] var flatnessDataKafkaTopic = "proteus-flatness"
   private [kernel] var flatnessDataKafkaTopic = "proteus-flatness"
   private [kernel] var jobStackBackendType = "memory"
@@ -144,36 +145,20 @@ object ProteusJob {
       classOf[com.twitter.chill.TraversableSerializer[_, mutable.Queue[_]]])
   }
 
+  def realtimeProcessing(realtimeSource: DataStream[CoilMeasurement], env: StreamExecutionEnvironment) : Unit = {
+    // real-time processing
+    LOG.info("Processed real-time output topic: processed-real-time")
+    val realtimeSinkSchema = new UntaggedObjectSerializationSchema[CoilMeasurement](env.getConfig)
+    val producerCfg = FlinkKafkaProducer010.writeToKafkaWithTimestamps(
+      realtimeSource.javaStream,
+      processedRealtimeDataKafkaTopic,
+      realtimeSinkSchema,
+      loadBaseKafkaProperties)
+    producerCfg.setLogFailuresOnly(false)
+    producerCfg.setFlushOnCheckpoint(true)
+  }
 
-  /**
-   * Start the PROTEUS Job in Flink. The job contains several operations including moments and SAX.
-   * @param parameters The parameters.
-   */
-  def startProteusJob(parameters: ParameterTool) : Unit = {
-
-    val env = StreamExecutionEnvironment.getExecutionEnvironment
-
-    // create the job
-    configureFlinkEnv(env)
-
-    // type info & serializer
-    implicit val inputTypeInfo = createTypeInformation[CoilMeasurement]
-    val inputSchema = new UntaggedObjectSerializationSchema[CoilMeasurement](env.getConfig)
-
-    // add kafka realtimeSource
-
-    val realtimeSource: DataStream[CoilMeasurement] = env.addSource(new FlinkKafkaConsumer010[CoilMeasurement](
-        realtimeDataKafkaTopic,
-        inputSchema,
-        loadConsumerKafkaProperties))
-
-    // add kafka flatnessSource
-
-    val flatnessSource: DataStream[CoilMeasurement] = env.addSource(new FlinkKafkaConsumer010[CoilMeasurement](
-        flatnessDataKafkaTopic,
-        inputSchema,
-        loadConsumerKafkaProperties))
-
+  def momentsProcessing(realtimeSource: DataStream[CoilMeasurement], env: StreamExecutionEnvironment) : Unit = {
     // simple moments
     if(ProteusJob.LinkMoments){
       LOG.info("Moments output topic: simple-moments")
@@ -190,7 +175,10 @@ object ProteusJob {
       producerCfg.setLogFailuresOnly(false)
       producerCfg.setFlushOnCheckpoint(true)
     }
+  }
 
+  def saxProcessing(realtimeSource: DataStream[CoilMeasurement], env: StreamExecutionEnvironment,
+                    parameters: ParameterTool) : Unit = {
     if(ProteusJob.LinkSAX){
 
       val variables = parameters.getRequired("sax-variable").split(",")
@@ -214,7 +202,10 @@ object ProteusJob {
 
       // Console.println("ThePlan:" + env.getExecutionPlan)
     }
+  }
 
+  def lassoProcessing(realtimeSource: DataStream[CoilMeasurement], flatnessSource: DataStream[CoilMeasurement],
+                      env: StreamExecutionEnvironment, parameters: ParameterTool) : Unit = {
     if(ProteusJob.LinkLasso){
       val variables = parameters.getRequired("lasso-variable").split(",")
       val lassoSinkSchema = new UntaggedObjectSerializationSchema[LassoResult](env.getConfig)
@@ -242,8 +233,38 @@ object ProteusJob {
           outputProducer.setLogFailuresOnly(false)
           outputProducer.setFlushOnCheckpoint(true)
       }
-
     }
+  }
+
+  /**
+   * Start the PROTEUS Job in Flink. The job contains several operations including moments and SAX.
+   * @param parameters The parameters.
+   */
+  def startProteusJob(parameters: ParameterTool) : Unit = {
+    val env = StreamExecutionEnvironment.getExecutionEnvironment
+    // create the job
+    configureFlinkEnv(env)
+    // type info & serializer
+    implicit val inputTypeInfo = createTypeInformation[CoilMeasurement]
+    val inputSchema = new UntaggedObjectSerializationSchema[CoilMeasurement](env.getConfig)
+
+    // add kafka realtimeSource
+    val realtimeSource: DataStream[CoilMeasurement] = env.addSource(new FlinkKafkaConsumer010[CoilMeasurement](
+        realtimeDataKafkaTopic,
+        inputSchema,
+        loadConsumerKafkaProperties))
+
+    // add kafka flatnessSource
+    val flatnessSource: DataStream[CoilMeasurement] = env.addSource(new FlinkKafkaConsumer010[CoilMeasurement](
+        flatnessDataKafkaTopic,
+        inputSchema,
+        loadConsumerKafkaProperties))
+
+    realtimeProcessing(realtimeSource, env)
+    momentsProcessing(realtimeSource, env)
+    saxProcessing(realtimeSource, env, parameters)
+    lassoProcessing(realtimeSource, flatnessSource, env, parameters)
+
 
     // execute the job
     env.execute("The Proteus Job")
