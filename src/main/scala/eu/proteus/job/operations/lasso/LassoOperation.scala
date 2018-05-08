@@ -23,6 +23,7 @@ import eu.proteus.solma.lasso.Lasso.LassoParam
 import eu.proteus.solma.lasso.{LassoDFStreamTransformOperation, LassoDelayedFeedbacks}
 import eu.proteus.solma.lasso.LassoStreamEvent.LassoStreamEvent
 import breeze.linalg.{Vector => BreezeVector}
+import eu.proteus.solma.utils.FileUtils
 import org.apache.flink.ml.common.ParameterMap
 import org.apache.flink.ml.math.{DenseVector, Vector}
 import org.apache.flink.streaming.api.scala.function.ProcessWindowFunction
@@ -78,20 +79,50 @@ class AggregateMeasurementValuesWindowFunction(val featureCount: Int) extends Pr
       case s2d: SensorMeasurement2D => s2d.x
     }
 
-    // TODO: pass the featureCount parameter to this function ?¿
-    // val breezeVector = BreezeVector.zeros[Double](featureCount)
-    val breezeVector = BreezeVector.zeros[Double](featureCount)
+    var breezeVector = BreezeVector.zeros[Double](featureCount)
+    (1 to featureCount).foreach{ x =>
+      breezeVector(x - 1) = Double.NaN//FeatureConversion.defaultValues(x)
+    }
 
+    var counter = 0
+    var measures = ""
     iter.foreach(measure => {
-      breezeVector(measure.slice.head) = measure.data.head._2
+      val varKey: String = measure match {
+        case s1d: SensorMeasurement1D => "C" + s1d.slice.head
+        case s2d: SensorMeasurement2D => "C" + s2d.slice.head + "y" + s2d.y
+      }
+      val convertedIndex: Int = measure match {
+        case s1d: SensorMeasurement1D => FeatureConversion.conversionMapping.getOrElse("C" + s1d.slice.head, -1)
+        case s2d: SensorMeasurement2D =>
+          var x = -1
+
+          if (FeatureConversion.conversionMapping.exists(x => x._1 == "C" + s2d.slice.head + "y" + s2d.y.toInt)) {
+            x = FeatureConversion.conversionMapping.getOrElse("C" + s2d.slice.head + "y" + s2d.y.toInt, -1)
+          }
+          else {
+            if (FeatureConversion.conversionMapping.exists(x => x._1 == "C" + s2d.slice.head)) {
+              x = FeatureConversion.conversionMapping.getOrElse("C" + s2d.slice.head, -1)
+            }
+          }
+          x
+      }
+      if (convertedIndex > 0) {
+        counter += 1
+        measures += (varKey + ", ")
+        breezeVector(convertedIndex - 1) = measure.data.head._2
+      }
     })
+
+    FileUtils.writeSimpleLog("Counter: " + iter.head.coilId + "-" + xCoord + "->" + counter + "/" + iter.length + " ("
+      + measures + ")")
 
     val vector = new DenseVector(breezeVector.toArray)
 
     val sensor: SensorMeasurement = SensorMeasurement((iter.head.coilId, xCoord), in.head.slice, vector)
     val ev: StreamEventWithPos[(Long, Double)] = sensor
-
-    out.collect(Left(ev))
+    //if (counter > 0) {
+      out.collect(Left(ev))
+    //}
   }
 }
 
@@ -132,7 +163,8 @@ class LassoOperation(
       .window(ProcessingTimeSessionWindows.withGap(Time.seconds(allowedFlatnessLateness)))
       .process(new AggregateFlatnessValuesWindowFunction())
 
-    val processedMeasurementStream = measurementStream.keyBy(x => getKeyByCoilAndX(x))
+    val processedMeasurementStream = measurementStream/*.filter(x =>
+      FeatureConversion.observedVariables.contains(x.slice.head))*/.keyBy(x => getKeyByCoilAndX(x))
       .window(ProcessingTimeSessionWindows.withGap(Time.seconds(allowedRealtimeLateness)))
       .process(new AggregateMeasurementValuesWindowFunction(featureCount))
     val connectedStreams = processedMeasurementStream.connect(processedFlatnessStream)
