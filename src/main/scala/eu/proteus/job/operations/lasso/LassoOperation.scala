@@ -113,7 +113,7 @@ class AggregateMeasurementValuesWindowFunction(val featureCount: Int) extends Pr
     })
     val vector = new DenseVector(breezeVector.toArray)
 
-    val sensor: SensorMeasurement = SensorMeasurement((iter.head.coilId, xCoord), in.head.slice, vector)
+    val sensor: SensorMeasurement = SensorMeasurement((iter.head.coilId, xCoord / 10), in.head.slice, vector)
     val ev: StreamEventWithPos[(Long, Double)] = sensor
 
     out.collect(Left(ev))
@@ -157,7 +157,8 @@ class LassoOperation(
       .window(ProcessingTimeSessionWindows.withGap(Time.seconds(allowedFlatnessLateness)))
       .process(new AggregateFlatnessValuesWindowFunction())
 
-    val processedMeasurementStream = measurementStream.keyBy(x => getKeyByCoilAndX(x))
+    val processedMeasurementStream = measurementStream.filter(x =>
+      FeatureConversion.observedVariables.contains(x.slice.head)).keyBy(x => getKeyByCoilAndX(x))
       .window(ProcessingTimeSessionWindows.withGap(Time.seconds(allowedRealtimeLateness)))
       .process(new AggregateMeasurementValuesWindowFunction(featureCount))
     val connectedStreams = processedMeasurementStream.connect(processedFlatnessStream)
